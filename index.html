@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>UNI Bot</title>
+<title>UNI Bot — Canlı</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap');
@@ -12,7 +12,8 @@
   .mono { font-family:'JetBrains Mono',monospace; }
   .display { font-family:'Space Grotesk',sans-serif; }
   .card { background:#16141C; border:1px solid #232028; border-radius:14px; padding:16px; margin:0 16px 14px; }
-  header { display:flex; align-items:center; gap:10px; padding:20px 18px 10px; border-bottom:1px solid #1E1B24; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:20px 18px 10px; border-bottom:1px solid #1E1B24; }
+  .hleft { display:flex; align-items:center; gap:10px; }
   .logo { width:34px; height:34px; border-radius:10px; background:#FF007A; display:flex; align-items:center; justify-content:center; font-weight:700; color:#0B0B0F; }
   .muted { color:#8B8894; font-size:11px; }
   .price { font-size:30px; font-weight:700; }
@@ -22,19 +23,29 @@
   .up { color:#2DD4BF; } .down { color:#FB7185; }
   canvas { max-height:220px; }
   .disclaimer { font-size:10.5px; color:#524F58; text-align:center; padding:4px 24px 22px; line-height:1.5; }
+  .dot { width:7px; height:7px; border-radius:99px; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .pulse { animation: pulse 1.4s ease-in-out infinite; }
+  .btn { border:none; border-radius:10px; padding:11px 18px; font-weight:600; font-size:13px; cursor:pointer; }
 </style>
 </head>
 <body>
   <header>
-    <div class="logo">⚡</div>
-    <div>
-      <div class="display" style="font-size:17px;font-weight:700;">UNI Bot</div>
-      <div class="muted" id="status">yükleniyor…</div>
+    <div class="hleft">
+      <div class="logo">⚡</div>
+      <div>
+        <div class="display" style="font-size:17px;font-weight:700;">UNI Bot</div>
+        <div class="muted" id="status">bağlanıyor…</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span class="dot pulse" id="live-dot" style="background:#8B8894;"></span>
+      <span class="muted" id="live-label">bağlanıyor</span>
     </div>
   </header>
 
   <div class="card">
-    <div class="muted">UNI / USDT (gerçek fiyat)</div>
+    <div class="muted">UNI / USDT — Binance canlı akış</div>
     <div class="price mono" id="price">—</div>
     <div style="display:flex;gap:18px;margin-top:10px;font-size:11px;" class="muted">
       <span>Taban: <span class="mono up" id="support">—</span></span>
@@ -43,7 +54,7 @@
   </div>
 
   <div class="card">
-    <div class="muted" style="margin-bottom:8px;">Fiyat geçmişi</div>
+    <div class="muted" style="margin-bottom:8px;">Fiyat geçmişi (son ~5 dk)</div>
     <canvas id="chart"></canvas>
   </div>
 
@@ -69,90 +80,207 @@
     </div>
   </div>
 
+  <div class="card" style="display:flex;gap:8px;">
+    <button class="btn" id="toggle-btn" style="flex:1;background:#232028;color:#F5F5F7;">Botu Durdur</button>
+    <button class="btn" id="reset-btn" style="background:#232028;color:#F5F5F7;">Sıfırla</button>
+  </div>
+
   <div class="card">
     <div class="muted" style="margin-bottom:8px;">İşlem Geçmişi</div>
     <div id="trades"></div>
   </div>
 
   <div class="disclaimer">
-    Fiyat verisi CoinGecko'nun ücretsiz halka açık API'sinden alınır. Alım/satım tamamen sanal bakiye
-    ile simüle edilir, gerçek para veya borsa bağlantısı yoktur. Yatırım tavsiyesi değildir.
-    Veriler ~15 dakikada bir GitHub Actions tarafından güncellenir.
+    Fiyat verisi Binance'in ücretsiz halka açık WebSocket akışından (UNIUSDT) gerçek zamanlı alınır.
+    Alım/satım tamamen sanal bakiye ile simüle edilir, gerçek para veya borsa hesabı bağlantısı yoktur.
+    Yatırım tavsiyesi değildir. Veriler yalnızca bu sayfa açıkken güncellenir ve tarayıcında saklanır.
   </div>
 
 <script>
 const START_CASH = 1000;
+const HISTORY_MAX = 300;
+const TRADES_MAX = 30;
+const PIVOT_WINDOW = 4;
+const COOLDOWN_MS = 12000;
+const SUPPORT_MARGIN = 0.0025;
+const RESISTANCE_MARGIN = 0.0025;
+const BUY_FRACTION = 0.35;
+const SELL_FRACTION = 0.6;
+const STORAGE_KEY = "uniBotStateV1";
+const SNAPSHOT_MS = 1000; // one chart/history point per second
+
 let chart;
+let ws;
+let latestPrice = null;
+let lastSnapshotAt = 0;
+let running = true;
+
+let state = loadState();
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return { history: [], cash: START_CASH, coins: 0, trades: [], lastActionAt: 0 };
+}
+
+function saveState() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+}
 
 function fmt(n, d=2){
-  if (n === null || n === undefined) return "—";
+  if (n === null || n === undefined || isNaN(n)) return "—";
   return Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
 }
 
-async function load() {
-  try {
-    const res = await fetch("state.json?_=" + Date.now());
-    const s = await res.json();
+function findPivots(history, window=PIVOT_WINDOW) {
+  const supports = [], resistances = [];
+  const n = history.length;
+  for (let i = window; i < n - window; i++) {
+    const center = history[i].price;
+    const seg = history.slice(i - window, i + window + 1);
+    if (seg.every(d => d.price >= center)) supports.push(history[i]);
+    if (seg.every(d => d.price <= center)) resistances.push(history[i]);
+  }
+  return { supports, resistances };
+}
 
-    document.getElementById("status").textContent =
-      "son güncelleme: " + new Date(s.last_updated).toLocaleTimeString("tr-TR");
-    document.getElementById("price").textContent = "$" + fmt(s.last_price, 3);
-    document.getElementById("support").textContent = s.support_level ? "$" + fmt(s.support_level, 3) : "—";
-    document.getElementById("resistance").textContent = s.resistance_level ? "$" + fmt(s.resistance_level, 3) : "—";
-    document.getElementById("cash").textContent = "$" + fmt(s.cash);
-    document.getElementById("coins").textContent = fmt(s.coins, 4);
-    document.getElementById("portfolio").textContent = "$" + fmt(s.portfolio_value);
+function connect() {
+  ws = new WebSocket("wss://stream.binance.com:9443/ws/uniusdt@trade");
+  ws.onopen = () => {
+    document.getElementById("live-dot").style.background = "#2DD4BF";
+    document.getElementById("live-label").textContent = "canlı";
+  };
+  ws.onclose = () => {
+    document.getElementById("live-dot").style.background = "#FB7185";
+    document.getElementById("live-label").textContent = "koptu, bağlanıyor…";
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => { try { ws.close(); } catch(e) {} };
+  ws.onmessage = (msg) => {
+    try {
+      const data = JSON.parse(msg.data);
+      const p = parseFloat(data.p);
+      if (!isNaN(p)) {
+        latestPrice = p;
+        document.getElementById("price").textContent = "$" + fmt(p, 3);
+      }
+    } catch (e) {}
+  };
+}
 
-    const pnl = s.portfolio_value - START_CASH;
-    const pnlEl = document.getElementById("pnl");
-    pnlEl.textContent = (pnl >= 0 ? "+" : "") + fmt(pnl) + " $";
-    pnlEl.className = "mono " + (pnl >= 0 ? "up" : "down");
+function tick() {
+  if (!running || latestPrice === null) return;
+  const now = Date.now();
+  if (now - lastSnapshotAt < SNAPSHOT_MS) return;
+  lastSnapshotAt = now;
 
-    const tradesDiv = document.getElementById("trades");
-    tradesDiv.innerHTML = "";
-    if (!s.trades || s.trades.length === 0) {
-      tradesDiv.innerHTML = '<div class="muted" style="font-size:12px;">Henüz işlem yok.</div>';
-    } else {
-      s.trades.forEach(t => {
-        const row = document.createElement("div");
-        row.className = "trade-row";
-        const cls = t.type === "AL" ? "up" : "down";
-        row.innerHTML = `<span class="${cls}">${t.type}</span>
-          <span class="muted">${new Date(t.time).toLocaleTimeString("tr-TR")}</span>
-          <span class="mono">${fmt(t.amount,3)} UNI @ $${fmt(t.price,3)}</span>`;
-        tradesDiv.appendChild(row);
-      });
-    }
+  state.history.push({ t: now, price: latestPrice });
+  if (state.history.length > HISTORY_MAX) state.history.shift();
 
-    const labels = s.history.map(h => new Date(h.t).toLocaleTimeString("tr-TR"));
-    const prices = s.history.map(h => h.price);
+  const { supports, resistances } = findPivots(state.history);
+  const supportLevel = supports.length ? supports[supports.length - 1].price : null;
+  const resistanceLevel = resistances.length ? resistances[resistances.length - 1].price : null;
 
-    if (!chart) {
-      const ctx = document.getElementById("chart").getContext("2d");
-      chart = new Chart(ctx, {
-        type: "line",
-        data: { labels, datasets: [{ data: prices, borderColor:"#FF007A", borderWidth:2, pointRadius:0, tension:0.25 }] },
-        options: {
-          responsive:true,
-          plugins:{ legend:{display:false} },
-          scales:{
-            x:{ display:false },
-            y:{ ticks:{ color:"#8B8894", font:{size:10} }, grid:{ color:"#1E1B24" } }
-          }
-        }
-      });
-    } else {
-      chart.data.labels = labels;
-      chart.data.datasets[0].data = prices;
-      chart.update();
-    }
-  } catch (e) {
-    document.getElementById("status").textContent = "veri henüz yok — bot ilk defa çalışınca görünür";
+  document.getElementById("support").textContent = supportLevel ? "$" + fmt(supportLevel, 3) : "—";
+  document.getElementById("resistance").textContent = resistanceLevel ? "$" + fmt(resistanceLevel, 3) : "—";
+
+  const cooldownOk = now - (state.lastActionAt || 0) > COOLDOWN_MS;
+  if (cooldownOk && supportLevel && latestPrice <= supportLevel * (1 + SUPPORT_MARGIN) && state.cash > 5) {
+    const spend = state.cash * BUY_FRACTION;
+    const bought = spend / latestPrice;
+    state.cash = Number((state.cash - spend).toFixed(2));
+    state.coins = Number((state.coins + bought).toFixed(6));
+    state.trades.unshift({ type: "AL", price: latestPrice, amount: bought, time: now });
+    state.lastActionAt = now;
+  } else if (cooldownOk && resistanceLevel && latestPrice >= resistanceLevel * (1 - RESISTANCE_MARGIN) && state.coins > 0.0001) {
+    const sellAmt = state.coins * SELL_FRACTION;
+    const gain = sellAmt * latestPrice;
+    state.coins = Number((state.coins - sellAmt).toFixed(6));
+    state.cash = Number((state.cash + gain).toFixed(2));
+    state.trades.unshift({ type: "SAT", price: latestPrice, amount: sellAmt, time: now });
+    state.lastActionAt = now;
+  }
+  state.trades = state.trades.slice(0, TRADES_MAX);
+
+  renderStats();
+  renderChart();
+  saveState();
+}
+
+function renderStats() {
+  document.getElementById("status").textContent = "son işlem noktası: " + new Date().toLocaleTimeString("tr-TR");
+  document.getElementById("cash").textContent = "$" + fmt(state.cash);
+  document.getElementById("coins").textContent = fmt(state.coins, 4);
+  const portfolio = state.cash + state.coins * (latestPrice || 0);
+  document.getElementById("portfolio").textContent = "$" + fmt(portfolio);
+  const pnl = portfolio - START_CASH;
+  const pnlEl = document.getElementById("pnl");
+  pnlEl.textContent = (pnl >= 0 ? "+" : "") + fmt(pnl) + " $";
+  pnlEl.className = "mono " + (pnl >= 0 ? "up" : "down");
+
+  const tradesDiv = document.getElementById("trades");
+  tradesDiv.innerHTML = "";
+  if (!state.trades.length) {
+    tradesDiv.innerHTML = '<div class="muted" style="font-size:12px;">Henüz işlem yok.</div>';
+  } else {
+    state.trades.forEach(t => {
+      const row = document.createElement("div");
+      row.className = "trade-row";
+      const cls = t.type === "AL" ? "up" : "down";
+      row.innerHTML = `<span class="${cls}">${t.type}</span>
+        <span class="muted">${new Date(t.time).toLocaleTimeString("tr-TR")}</span>
+        <span class="mono">${fmt(t.amount,3)} UNI @ $${fmt(t.price,3)}</span>`;
+      tradesDiv.appendChild(row);
+    });
   }
 }
 
-load();
-setInterval(load, 30000);
+function renderChart() {
+  const labels = state.history.map(h => new Date(h.t).toLocaleTimeString("tr-TR"));
+  const prices = state.history.map(h => h.price);
+  if (!chart) {
+    const ctx = document.getElementById("chart").getContext("2d");
+    chart = new Chart(ctx, {
+      type: "line",
+      data: { labels, datasets: [{ data: prices, borderColor:"#FF007A", borderWidth:2, pointRadius:0, tension:0.2 }] },
+      options: {
+        responsive:true,
+        animation:false,
+        plugins:{ legend:{display:false} },
+        scales:{
+          x:{ display:false },
+          y:{ ticks:{ color:"#8B8894", font:{size:10} }, grid:{ color:"#1E1B24" } }
+        }
+      }
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = prices;
+    chart.update("none");
+  }
+}
+
+document.getElementById("toggle-btn").addEventListener("click", () => {
+  running = !running;
+  const btn = document.getElementById("toggle-btn");
+  btn.textContent = running ? "Botu Durdur" : "Botu Başlat";
+  btn.style.background = running ? "#232028" : "#FF007A";
+  btn.style.color = running ? "#F5F5F7" : "#0B0B0F";
+});
+
+document.getElementById("reset-btn").addEventListener("click", () => {
+  state = { history: [], cash: START_CASH, coins: 0, trades: [], lastActionAt: 0 };
+  saveState();
+  renderStats();
+  renderChart();
+});
+
+renderStats();
+renderChart();
+connect();
+setInterval(tick, 300);
 </script>
 </body>
 </html>
