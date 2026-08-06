@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>UNI Bot</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap');
+  * { box-sizing: border-box; }
+  body { margin:0; background:#0B0B0F; color:#F5F5F7; font-family:'Inter',system-ui,sans-serif; }
+  .mono { font-family:'JetBrains Mono',monospace; }
+  .display { font-family:'Space Grotesk',sans-serif; }
+  .card { background:#16141C; border:1px solid #232028; border-radius:14px; padding:16px; margin:0 16px 14px; }
+  header { display:flex; align-items:center; gap:10px; padding:20px 18px 10px; border-bottom:1px solid #1E1B24; }
+  .logo { width:34px; height:34px; border-radius:10px; background:#FF007A; display:flex; align-items:center; justify-content:center; font-weight:700; color:#0B0B0F; }
+  .muted { color:#8B8894; font-size:11px; }
+  .price { font-size:30px; font-weight:700; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:0 16px 14px; }
+  .grid2 .card { margin:0; }
+  .trade-row { display:flex; justify-content:space-between; font-size:12px; border-bottom:1px solid #1E1B24; padding:6px 0; }
+  .up { color:#2DD4BF; } .down { color:#FB7185; }
+  canvas { max-height:220px; }
+  .disclaimer { font-size:10.5px; color:#524F58; text-align:center; padding:4px 24px 22px; line-height:1.5; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="logo">⚡</div>
+    <div>
+      <div class="display" style="font-size:17px;font-weight:700;">UNI Bot</div>
+      <div class="muted" id="status">yükleniyor…</div>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="muted">UNI / USDT (gerçek fiyat)</div>
+    <div class="price mono" id="price">—</div>
+    <div style="display:flex;gap:18px;margin-top:10px;font-size:11px;" class="muted">
+      <span>Taban: <span class="mono up" id="support">—</span></span>
+      <span>Tepe: <span class="mono down" id="resistance">—</span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px;">Fiyat geçmişi</div>
+    <canvas id="chart"></canvas>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="muted">Nakit (USDT)</div>
+      <div class="mono" style="font-size:18px;font-weight:600;margin-top:4px;" id="cash">—</div>
+    </div>
+    <div class="card">
+      <div class="muted">UNI Bakiye</div>
+      <div class="mono" style="font-size:18px;font-weight:600;margin-top:4px;" id="coins">—</div>
+    </div>
+  </div>
+
+  <div class="card" style="display:flex;justify-content:space-between;align-items:center;">
+    <div>
+      <div class="muted">Portföy Değeri</div>
+      <div class="mono display" style="font-size:22px;font-weight:700;" id="portfolio">—</div>
+    </div>
+    <div style="text-align:right;">
+      <div class="muted">Kâr / Zarar</div>
+      <div class="mono" style="font-size:15px;font-weight:600;" id="pnl">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px;">İşlem Geçmişi</div>
+    <div id="trades"></div>
+  </div>
+
+  <div class="disclaimer">
+    Fiyat verisi CoinGecko'nun ücretsiz halka açık API'sinden alınır. Alım/satım tamamen sanal bakiye
+    ile simüle edilir, gerçek para veya borsa bağlantısı yoktur. Yatırım tavsiyesi değildir.
+    Veriler ~15 dakikada bir GitHub Actions tarafından güncellenir.
+  </div>
+
+<script>
+const START_CASH = 1000;
+let chart;
+
+function fmt(n, d=2){
+  if (n === null || n === undefined) return "—";
+  return Number(n).toLocaleString("tr-TR", {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+
+async function load() {
+  try {
+    const res = await fetch("state.json?_=" + Date.now());
+    const s = await res.json();
+
+    document.getElementById("status").textContent =
+      "son güncelleme: " + new Date(s.last_updated).toLocaleTimeString("tr-TR");
+    document.getElementById("price").textContent = "$" + fmt(s.last_price, 3);
+    document.getElementById("support").textContent = s.support_level ? "$" + fmt(s.support_level, 3) : "—";
+    document.getElementById("resistance").textContent = s.resistance_level ? "$" + fmt(s.resistance_level, 3) : "—";
+    document.getElementById("cash").textContent = "$" + fmt(s.cash);
+    document.getElementById("coins").textContent = fmt(s.coins, 4);
+    document.getElementById("portfolio").textContent = "$" + fmt(s.portfolio_value);
+
+    const pnl = s.portfolio_value - START_CASH;
+    const pnlEl = document.getElementById("pnl");
+    pnlEl.textContent = (pnl >= 0 ? "+" : "") + fmt(pnl) + " $";
+    pnlEl.className = "mono " + (pnl >= 0 ? "up" : "down");
+
+    const tradesDiv = document.getElementById("trades");
+    tradesDiv.innerHTML = "";
+    if (!s.trades || s.trades.length === 0) {
+      tradesDiv.innerHTML = '<div class="muted" style="font-size:12px;">Henüz işlem yok.</div>';
+    } else {
+      s.trades.forEach(t => {
+        const row = document.createElement("div");
+        row.className = "trade-row";
+        const cls = t.type === "AL" ? "up" : "down";
+        row.innerHTML = `<span class="${cls}">${t.type}</span>
+          <span class="muted">${new Date(t.time).toLocaleTimeString("tr-TR")}</span>
+          <span class="mono">${fmt(t.amount,3)} UNI @ $${fmt(t.price,3)}</span>`;
+        tradesDiv.appendChild(row);
+      });
+    }
+
+    const labels = s.history.map(h => new Date(h.t).toLocaleTimeString("tr-TR"));
+    const prices = s.history.map(h => h.price);
+
+    if (!chart) {
+      const ctx = document.getElementById("chart").getContext("2d");
+      chart = new Chart(ctx, {
+        type: "line",
+        data: { labels, datasets: [{ data: prices, borderColor:"#FF007A", borderWidth:2, pointRadius:0, tension:0.25 }] },
+        options: {
+          responsive:true,
+          plugins:{ legend:{display:false} },
+          scales:{
+            x:{ display:false },
+            y:{ ticks:{ color:"#8B8894", font:{size:10} }, grid:{ color:"#1E1B24" } }
+          }
+        }
+      });
+    } else {
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = prices;
+      chart.update();
+    }
+  } catch (e) {
+    document.getElementById("status").textContent = "veri henüz yok — bot ilk defa çalışınca görünür";
+  }
+}
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
