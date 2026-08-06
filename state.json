@@ -14,16 +14,21 @@
       "t": "2026-08-06T22:54:26.226789+00:00",
       "price": 4.01,
       "tick": 3
+    },
+    {
+      "t": "2026-08-06T23:01:34.316693+00:00",
+      "price": 4.01,
+      "tick": 4
     }
   ],
   "cash": 1000.0,
   "coins": 0.0,
   "trades": [],
-  "tick": 3,
+  "tick": 4,
   "last_action_tick": -100,
   "support_level": null,
   "resistance_level": null,
   "last_price": 4.01,
-  "last_updated": "2026-08-06T22:54:26.226789+00:00",
+  "last_updated": "2026-08-06T23:01:34.316693+00:00",
   "portfolio_value": 1000.0
 }
